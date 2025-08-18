@@ -1,0 +1,9 @@
+#ifndef SM3_DATA_H
+#define SM3_DATA_H
+#include <stdint.h> 
+#include <stddef.h>
+// �Զ����ɵ�SM3�������飬�����ļ�: text_data_512.txt
+void    press_hash();
+
+ 
+ #endif // SM3_DATA_H
