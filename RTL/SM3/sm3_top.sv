@@ -70,7 +70,7 @@ always @(posedge i_clk or posedge i_rst) begin
         count <= 12'd0;
         count_done <= 1'b0;
     end else if (r_pad_done1_flag) begin
-        if (count == 12'd417) begin    // 达到阈�??
+        if (count == 12'd1197) begin    // 达到阈�??
             count <= 12'd0;
             count_done <= 1'b1;       // 输出完成脉冲
         end
@@ -196,3 +196,4 @@ sm3_encrypt u_sm3_en(
 );
 
 endmodule
+
