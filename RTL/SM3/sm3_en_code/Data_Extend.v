@@ -1,14 +1,11 @@
-
-`timescale 1ns / 1ps
-
 module Data_Extend(
     input               i_clk           ,
     input               i_rst           ,
     input  [511 :0]     i_padding_data  ,
     input               i_padding_valid ,
     // Dual read-port interface for consumer (SM3_Encrypt)
-    input      [6:0]    i_rd_addr0      ,
-    input      [6:0]    i_rd_addr1      ,
+    input      [7:0]    i_rd_addr0      ,
+    input      [7:0]    i_rd_addr1      ,
     output reg [31:0]   o_rd_data0      ,
     output reg [31:0]   o_rd_data1      ,
     // Schedule ready flag
@@ -36,10 +33,10 @@ assign o_extend_valid = ro_extend_valid ;
 // -----------------------------------------------------------------------------
 reg [31:0] mem [0:131];
 reg        mem_we;
-reg [6:0]  mem_waddr;
+reg [7:0]  mem_waddr;
 reg [31:0] mem_wdata;
-reg [6:0]  mem_raddr0;
-reg [6:0]  mem_raddr1;
+reg [7:0]  mem_raddr0;
+reg [7:0]  mem_raddr1;
 
 always @(posedge i_clk) begin
     if (mem_we) begin
@@ -47,10 +44,15 @@ always @(posedge i_clk) begin
     end
 end
 
+// Address mux: when schedule is ready, serve external read addresses;
+// otherwise use internal FSM addresses during generation.
+wire [7:0] raddr0_mux = ro_extend_valid ? i_rd_addr0 : mem_raddr0;
+wire [7:0] raddr1_mux = ro_extend_valid ? i_rd_addr1 : mem_raddr1;
+
 // synchronous read (registered outputs)
-always @(posedge i_clk) begin
-    o_rd_data0 <= mem[mem_raddr0];
-    o_rd_data1 <= mem[mem_raddr1];
+always @(*) begin
+    o_rd_data0 <= mem[raddr0_mux];
+    o_rd_data1 <= mem[raddr1_mux];
 end
 
 
@@ -67,17 +69,7 @@ begin
     end
 end
 
-//W0-W15
-genvar g_i;
-generate
-    for(g_i = 0 ; g_i < 16 ; g_i = g_i + 1)
-    begin:Encode
-        assign w_padding_data_f[g_i*32 +31 : g_i*32] = ri_padding_data[511 - g_i*32 : 511 - 31 - g_i*32];
-    end
-endgenerate
 
-
-// Note: Removed wide o_extend_data bus. Consumer reads words via RAM ports.
 
 
 // -----------------------------------------------------------------------------
@@ -91,10 +83,15 @@ localparam S_W16_67_READ3_REQ6  = 3'd4;
 localparam S_WP_0_67_READ       = 3'd5;
 localparam S_WP_0_67_WRITE      = 3'd6;
 localparam S_DONE               = 3'd7;
+localparam FINAL_STEP_W16_67    = 4'd8;
+localparam GET_TP1              = 4'd9; 
+localparam GET_W16_9            = 8'd10;
+localparam W_pai_67_02          = 8'd11;
+localparam W_pai_67_01          = 8'd12;
 
-reg [2:0]  state;
-reg [6:0]  idx;       // generic index up to 131
-reg [6:0]  j_round;   // 16..67
+reg [7:0]  state;
+reg [7:0]  idx;       // generic index up to 131
+reg [7:0]  j_round;   // 16..67
 
 // Temporaries for W16..67
 reg [31:0] t_jm16, t_jm9, t_jm3, t_jm13, t_jm6;
@@ -147,9 +144,10 @@ always @(posedge i_clk or posedge i_rst) begin
         mem_we <= 1'b0; // default
         case (state)
             S_IDLE: begin
-                ro_extend_valid <= 1'b0;
+                
                 if (ri_padding_valid_1d) begin
                     idx <= 7'd0;
+                    ro_extend_valid <= 1'b0;
                     state <= S_W0_15;
                 end
             end
@@ -169,86 +167,85 @@ always @(posedge i_clk or posedge i_rst) begin
 
             // For each j=16..67: READ1 -> READ2 -> READ3 (request j-6)
             S_W16_67_READ1: begin
-                mem_raddr0 <= j_round - 7'd16; // j-16
-                mem_raddr1 <= j_round - 7'd9;  // j-9
-                state <= S_W16_67_READ2;
+                mem_we    <= 1'b0 ;
+                if(j_round==68)begin
+                    state<=W_pai_67_01 ;
+                end
+                else  begin
+                    mem_raddr0 <= j_round - 7'd16; // j-16
+                    mem_raddr1 <= j_round - 7'd9;  // j-9
+                    state <= S_W16_67_READ2;
+                end
             end
             S_W16_67_READ2: begin
                 t_jm16 <= o_rd_data0;
                 t_jm9  <= o_rd_data1;
                 mem_raddr0 <= j_round - 7'd3;  // j-3
                 mem_raddr1 <= j_round - 7'd13; // j-13
-                state <= S_W16_67_READ3_REQ6;
+                state <= GET_W16_9;
             end
-            S_W16_67_READ3_REQ6: begin
+            GET_W16_9:begin
                 t_jm3  <= o_rd_data0;
                 t_jm13 <= o_rd_data1;
+                state  <= S_W16_67_READ3_REQ6 ;
+            end
+
+            S_W16_67_READ3_REQ6: begin //4
+                
+                
                 // compute intermediates
                 t_p1x  <= t_jm16 ^ t_jm9 ^ {t_jm3[16:0], t_jm3[31:17]};
                 t_mid1 <= {t_jm13[24:0], t_jm13[31:25]};
                 // request j-6 and on next S_W16_67_READ1 use write-back path
                 mem_raddr0 <= j_round - 7'd6; // j-6
                 // piggyback write in parallel (one cycle latency)
-                t_p1 <= P1(t_p1x);
-                t_wj <= t_p1 ^ t_mid1; // add j-6 next cycle
+                
+                state <= GET_TP1 ;
                 // next cycle: S_W16_67_READ1
-                state <= S_W16_67_READ1;
+                //state <= S_W16_67_READ1;
                 // use idx[0] as small flag-based write enable in next cycle
                 idx[0] <= 1'b1;
             end
+            GET_TP1:begin
+                t_p1 <= P1(t_p1x);
+                state <= FINAL_STEP_W16_67 ;
+            end
+            FINAL_STEP_W16_67: begin
+                //t_wj <= t_p1 ^ t_mid1^o_rd_data0; // add j-6 next cycle
+                mem_we    <= 1'b1 ;
+                mem_wdata <= t_p1 ^ t_mid1^o_rd_data0 ; 
+                mem_waddr <= j_round;
+                j_round <= j_round +1 ;
+                state <= S_W16_67_READ1 ;
+            end
+            W_pai_67_01: begin
+                mem_we    <= 1'b0 ;
+                if(j_round==132)begin
+                    ro_extend_valid <= 1 ;
+                    state <= S_IDLE ;
+                end else begin
+                    
+                    mem_raddr0 <= j_round-68 ;
+                    mem_raddr1 <= j_round-64 ;    
+                    state <= W_pai_67_02 ;   
+                end       
+            end
+            W_pai_67_02: begin
+            
+                mem_we    <= 1'b1 ;
+                mem_wdata <= o_rd_data0^o_rd_data1 ;
+                mem_waddr <= j_round;
+                j_round <= j_round +1 ;
+                state <= W_pai_67_01;
+
+            end
+
+
+
         endcase
 
-        // Perform the delayed write when j-6 data arrives (on S_W16_67_READ1)
-        if (state == S_W16_67_READ1 && idx[0]) begin
-            t_jm6 <= o_rd_data0;
-            mem_waddr <= j_round;
-            mem_wdata <= t_wj ^ t_jm6;
-            mem_we    <= 1'b1;
-            idx[0]    <= 1'b0;
-            if (j_round == 7'd67) begin
-                idx <= 7'd0;
-                state <= S_WP_0_67_READ;
-            end else begin
-                j_round <= j_round + 7'd1;
-                state   <= S_W16_67_READ1;
-            end
-        end
 
-        // Compute W'0..67 = Wj ^ Wj+4 into addresses 68..131
-        if (state == S_WP_0_67_READ) begin
-            mem_raddr0 <= idx;         // j
-            mem_raddr1 <= idx + 7'd4;  // j+4
-            state <= S_WP_0_67_WRITE;
-        end else if (state == S_WP_0_67_WRITE) begin
-            mem_waddr <= 7'd68 + idx;
-            mem_wdata <= o_rd_data0 ^ o_rd_data1;
-            mem_we    <= 1'b1;
-            if (idx == 7'd67) begin
-                state <= S_DONE;
-            end else begin
-                idx <= idx + 7'd1;
-                state <= S_WP_0_67_READ;
-            end
-        end else if (state == S_DONE) begin
-            ro_extend_valid <= 1'b1;
-            // allow new input to retrigger
-            if (ri_padding_valid_1d) begin
-                ro_extend_valid <= 1'b0;
-                state <= S_W0_15;
-                idx <= 7'd0;
-                j_round <= 7'd16;
-            end
-        end
     end
 end
-
-// W' computed in FSM into RAM addresses 68..131
-
-// Removed register stage array; outputs are read via RAM ports.
-
-
-
-
-// Valid is managed by FSM; removed delay chain
 
 endmodule
